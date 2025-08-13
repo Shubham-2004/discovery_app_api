@@ -6,7 +6,11 @@
     "express": "^5.1.0",
     "googleapis": "^155.0.0",
     "moment": "^2.30.1",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.5.0",
+    "firebase-admin": "^11.10.1"
   },
   "name": "allevents_api",
   "version": "1.0.0",
