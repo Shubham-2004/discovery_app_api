@@ -1,0 +1,15 @@
+# Simulated request to keep Render project awake every 15 minutes
+name: Keep Render Alive
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Runs every 15 minutes
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  curl-website:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run cURL on Website
+        run: curl -I https://discovery-app-api.onrender.com
