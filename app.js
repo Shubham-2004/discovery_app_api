@@ -43,13 +43,13 @@ let activeIcons = {
         isActive: true,
         lastUpdated: new Date()
     },
-    navratri: {
+    ic_navratri: {
         name: 'Navratri',
         url: '/uploads/icons/navratri.png',
         isActive: false,
         lastUpdated: new Date()
     },
-    halloween: {
+    ic_halloween: {
         name: 'Halloween',
         url: '/uploads/icons/halloween.png',
         isActive: false,
