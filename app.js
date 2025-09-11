@@ -7,10 +7,14 @@ const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+const SLACK_CHANNEL = process.env.SLACK_CHANNEL || 'app-feedbacks';
+const SLACK_BOT_NAME = process.env.SLACK_BOT_NAME || 'App Feedbacks Bot';
 
 // Configure Cloudinary
 cloudinary.config({
@@ -24,7 +28,7 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Serve static files from uploads directory
+// Serve static files from uploads directory (optional, for debugging)
 app.use('/uploads', express.static('uploads'));
 
 // Ensure uploads directory exists
@@ -34,30 +38,6 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 // ========================================
-// ICON CHANGER API - In-memory storage
-// ========================================
-let activeIcons = {
-    DEFAULT: {
-        name: 'Default',
-        url: '/uploads/icons/default.png',
-        isActive: true,
-        lastUpdated: new Date()
-    },
-    navratri1: {
-        name: 'Navratri 1',
-        url: '/uploads/icons/navratri1.png',
-        isActive: false,
-        lastUpdated: new Date()
-    },
-    navratri3: {
-        name: 'Navratri 3',
-        url: '/uploads/icons/navratri3.png',
-        isActive: false,
-        lastUpdated: new Date()
-    }
-};
-
-// ========================================
 // FEEDBACK API - Multer Configuration
 // ========================================
 const storage = multer.memoryStorage();
@@ -65,7 +45,6 @@ const storage = multer.memoryStorage();
 const fileFilter = (req, file, cb) => {
     const allowedTypes = process.env.ALLOWED_FILE_TYPES?.split(',') || ['jpg', 'jpeg', 'png', 'gif', 'webp'];
     const fileExt = path.extname(file.originalname).toLowerCase().slice(1);
-    
     if (allowedTypes.includes(fileExt)) {
         cb(null, true);
     } else {
@@ -108,7 +87,6 @@ async function uploadToCloudinary(buffer, originalname) {
                     console.error('Cloudinary upload error:', error);
                     reject(error);
                 } else {
-                    console.log(`✅ Uploaded to Cloudinary: ${result.secure_url}`);
                     resolve({
                         url: result.secure_url,
                         public_id: result.public_id,
@@ -179,7 +157,6 @@ async function appendToSheet(feedbackData) {
             resource,
         });
 
-        console.log('✅ Data successfully added to Google Sheets');
         return result;
     } catch (error) {
         console.error('❌ Error appending to sheet:', error);
@@ -215,58 +192,87 @@ async function initializeSheetHeaders() {
                 valueInputOption: 'RAW',
                 resource: { values: [headers] },
             });
-            
-            console.log('✅ Sheet headers initialized');
-        } else {
-            console.log('✅ Sheet headers already exist');
         }
     } catch (error) {
         console.error('❌ Error initializing sheet headers:', error);
     }
 }
 
-// Function to notify all apps (for icon changes)
-function notifyAllApps(activeIconName) {
-    console.log(`📢 Notifying all apps: Active icon changed to ${activeIconName}`);
+// ✅ NEW: Function to send Slack notification for feedback
+async function sendFeedbackSlackNotification(feedbackData) {
+  if (!SLACK_WEBHOOK_URL) {
+    console.warn('⚠️ SLACK_WEBHOOK_URL is not set. Skipping Slack notification.');
+    return;
+  }
+
+  const message = {
+    username: SLACK_BOT_NAME,
+    channel: SLACK_CHANNEL,
+    text: "New Feedback Submission",
+    attachments: [
+      {
+        pretext: "A new feedback entry has been submitted to the database.",
+        color: "#21C0E8",
+        fields: [
+          {
+            title: "Title",
+            value: feedbackData.title,
+            short: false
+          },
+          {
+            title: "Description",
+            value: feedbackData.description,
+            short: false
+          },
+          {
+            title: "User ID",
+            value: feedbackData.userId,
+            short: true
+          },
+          {
+            title: "Email ID",
+            value: feedbackData.emailId,
+            short: true
+          },
+          {
+            title: "Photo URLs",
+            value: feedbackData.photos || "No photos uploaded.",
+            short: false
+          },
+        ],
+      }
+    ]
+  };
+
+  try {
+    await axios.post(SLACK_WEBHOOK_URL, message);
+    console.log('✅ Slack notification sent successfully.');
+  } catch (error) {
+    console.error('❌ Failed to send Slack notification:', error.message);
+  }
 }
 
 // ========================================
-// ROUTES - Health Check
+// ROUTES - Health Check & Feedback API
 // ========================================
+
 app.get('/health', (req, res) => {
-    console.log('✅ Health check requested');
     res.json({ 
         success: true,
-        message: 'Unified API is running!',
-        services: ['Feedback API', 'Icon Changer API'],
+        message: 'Feedback API is running!',
         timestamp: new Date().toISOString(),
         port: PORT,
         cloudinary: {
             configured: !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY),
             cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'Not configured'
         },
-        activeIcons: Object.keys(activeIcons).length,
-        availableRoutes: {
-            feedback: [
-                'POST /api/feedback - Submit feedback with photos',
-                'GET /api/feedback - Retrieve all feedback'
-            ],
-            iconChanger: [
-                'GET /api/app/current-icon - Get current active icon',
-                'GET /api/admin/icons - Get all icons',
-                'POST /api/admin/icons/activate - Activate an icon',
-                'POST /api/admin/icons/add - Add new icon'
-            ],
-            general: [
-                'GET /health - Health check'
-            ]
-        }
+        availableRoutes: [
+            'POST /api/feedback - Submit feedback with photos',
+            'GET /api/feedback - Retrieve all feedback',
+            'GET /health - Health check'
+        ]
     });
 });
-
-// ========================================
-// FEEDBACK API ROUTES
-// ========================================
 
 // POST endpoint for feedback submission
 app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
@@ -279,14 +285,6 @@ app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
             customDate,
             customTimestamp
         } = req.body;
-
-        console.log('📝 Received feedback submission:', {
-            title: title?.substring(0, 50) + '...',
-            description: description?.substring(0, 50) + '...',
-            userId,
-            emailId,
-            filesCount: req.files ? req.files.length : 0
-        });
 
         // Validation
         if (!title || title.trim() === '') {
@@ -313,27 +311,18 @@ app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
         let photoDetails = [];
         
         if (req.files && req.files.length > 0) {
-            console.log(`📸 Uploading ${req.files.length} photos to Cloudinary...`);
-            
             try {
                 for (let i = 0; i < req.files.length; i++) {
                     const file = req.files[i];
-                    console.log(`📤 Uploading file ${i + 1}/${req.files.length}: ${file.originalname}`);
-                    
                     try {
                         const uploadResult = await uploadToCloudinary(file.buffer, file.originalname);
                         cloudinaryUrls.push(uploadResult.url);
                         photoDetails.push(uploadResult);
-                        console.log(`✅ File ${i + 1} uploaded successfully`);
                     } catch (fileError) {
-                        console.error(`❌ Failed to upload file ${file.originalname}:`, fileError);
+                        // Skip failed uploads
                     }
                 }
-                
-                console.log(`🎉 Successfully uploaded ${cloudinaryUrls.length}/${req.files.length} photos to Cloudinary`);
-                
             } catch (cloudinaryError) {
-                console.error('❌ Error uploading to Cloudinary:', cloudinaryError);
                 return res.status(500).json({
                     success: false,
                     error: 'Failed to upload photos',
@@ -353,9 +342,10 @@ app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
             timestamp: timestamp
         };
 
-        console.log('📊 Saving to Google Sheets...');
         await appendToSheet(feedbackData);
-        console.log('🎉 Feedback submitted successfully!');
+
+        // ✅ NEW: Call the Slack notification function after successfully saving to the sheet
+        await sendFeedbackSlackNotification(feedbackData);
 
         res.status(201).json({
             success: true,
@@ -373,7 +363,6 @@ app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Error submitting feedback:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error',
@@ -385,8 +374,6 @@ app.post('/api/feedback', upload.array('photos', 10), async (req, res) => {
 // GET endpoint to retrieve feedback
 app.get('/api/feedback', async (req, res) => {
     try {
-        console.log('📋 Retrieving feedback data...');
-        
         const sheets = await getGoogleSheetsInstance();
         const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
@@ -405,8 +392,6 @@ app.get('/api/feedback', async (req, res) => {
             return feedback;
         });
 
-        console.log(`📊 Retrieved ${data.length} feedback entries`);
-
         res.json({
             success: true,
             count: data.length,
@@ -414,7 +399,6 @@ app.get('/api/feedback', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Error retrieving feedback:', error);
         res.status(500).json({
             success: false,
             error: 'Internal server error',
@@ -423,183 +407,8 @@ app.get('/api/feedback', async (req, res) => {
     }
 });
 
-// ========================================
-// ICON CHANGER API ROUTES
-// ========================================
-
-// 📱 App: Get current active icon
-app.get('/api/app/current-icon', (req, res) => {
-    try {
-        console.log('📱 App requesting current icon');
-        const activeIcon = Object.keys(activeIcons).find(key => activeIcons[key].isActive);
-        
-        if (!activeIcon) {
-            console.log('❌ No active icon found');
-            return res.status(404).json({
-                success: false,
-                message: 'No active icon found'
-            });
-        }
-
-        console.log(`✅ Current active icon: ${activeIcon}`);
-        res.json({
-            success: true,
-            data: {
-                iconName: activeIcon,
-                displayName: activeIcons[activeIcon].name,
-                url: `${req.protocol}://${req.get('host')}${activeIcons[activeIcon].url}`,
-                lastUpdated: activeIcons[activeIcon].lastUpdated
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Get current icon error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to get current icon',
-            error: error.message
-        });
-    }
-});
-
-// 🎯 Admin: Set active icon
-app.post('/api/admin/icons/activate', (req, res) => {
-    try {
-        console.log('🎯 Admin activating icon:', req.body);
-        const { iconName } = req.body;
-
-        if (!iconName) {
-            console.log('❌ No iconName provided');
-            return res.status(400).json({
-                success: false,
-                message: 'iconName is required'
-            });
-        }
-
-        if (!activeIcons[iconName]) {
-            console.log(`❌ Icon '${iconName}' not found. Available icons:`, Object.keys(activeIcons));
-            return res.status(400).json({
-                success: false,
-                message: `Invalid icon name '${iconName}'. Available icons: ${Object.keys(activeIcons).join(', ')}`
-            });
-        }
-
-        // Deactivate all icons
-        Object.keys(activeIcons).forEach(key => {
-            activeIcons[key].isActive = false;
-        });
-
-        // Activate selected icon
-        activeIcons[iconName].isActive = true;
-        activeIcons[iconName].lastUpdated = new Date();
-
-        console.log(`✅ Icon '${iconName}' activated successfully`);
-        notifyAllApps(iconName);
-
-        res.json({
-            success: true,
-            message: `Icon '${activeIcons[iconName].name}' activated successfully`,
-            data: {
-                activeIcon: iconName,
-                displayName: activeIcons[iconName].name,
-                url: activeIcons[iconName].url
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Activation error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to activate icon',
-            error: error.message
-        });
-    }
-});
-
-// 📋 Admin: Get all icons
-app.get('/api/admin/icons', (req, res) => {
-    try {
-        console.log('📋 Admin requesting all icons');
-        const icons = Object.keys(activeIcons).map(key => ({
-            iconName: key,
-            displayName: activeIcons[key].name,
-            url: `${req.protocol}://${req.get('host')}${activeIcons[key].url}`,
-            isActive: activeIcons[key].isActive,
-            lastUpdated: activeIcons[key].lastUpdated
-        }));
-
-        console.log(`✅ Returning ${icons.length} icons`);
-        res.json({
-            success: true,
-            data: icons
-        });
-
-    } catch (error) {
-        console.error('❌ Get icons error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to get icons',
-            error: error.message
-        });
-    }
-});
-
-// 🔐 Admin: Add new icon
-app.post('/api/admin/icons/add', (req, res) => {
-    try {
-        console.log('📤 Admin adding icon:', req.body);
-        const { iconName, displayName, iconUrl } = req.body;
-        
-        if (!iconName || !displayName || !iconUrl) {
-            return res.status(400).json({
-                success: false,
-                message: 'iconName, displayName, and iconUrl are required'
-            });
-        }
-
-        if (activeIcons[iconName]) {
-            return res.status(400).json({
-                success: false,
-                message: `Icon '${iconName}' already exists`
-            });
-        }
-
-        // Save icon info
-        activeIcons[iconName] = {
-            name: displayName,
-            url: iconUrl,
-            isActive: false,
-            lastUpdated: new Date()
-        };
-
-        console.log(`✅ Icon '${iconName}' added successfully`);
-        res.json({
-            success: true,
-            message: 'Icon added successfully',
-            data: {
-                iconName,
-                displayName,
-                url: iconUrl
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Add icon error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to add icon',
-            error: error.message
-        });
-    }
-});
-
-// ========================================
-// ERROR HANDLING MIDDLEWARE
-// ========================================
 
 app.use((error, req, res, next) => {
-    console.error('🚨 Middleware error:', error);
-    
     if (error instanceof multer.MulterError) {
         if (error.code === 'LIMIT_FILE_SIZE') {
             return res.status(400).json({
@@ -623,7 +432,6 @@ app.use((error, req, res, next) => {
             });
         }
     }
-    
     if (error.message && error.message.includes('File type')) {
         return res.status(400).json({
             success: false,
@@ -631,7 +439,6 @@ app.use((error, req, res, next) => {
             message: error.message
         });
     }
-    
     res.status(500).json({
         success: false,
         error: 'Internal server error',
@@ -639,66 +446,30 @@ app.use((error, req, res, next) => {
     });
 });
 
-// 404 handler
 app.use((req, res) => {
-    console.log(`❌ 404 - Route not found: ${req.method} ${req.originalUrl}`);
     res.status(404).json({
         success: false,
         error: 'Endpoint not found',
         message: `${req.method} ${req.originalUrl} not found`,
-        availableEndpoints: {
-            feedback: [
-                'POST /api/feedback',
-                'GET /api/feedback'
-            ],
-            iconChanger: [
-                'GET /api/app/current-icon',
-                'GET /api/admin/icons',
-                'POST /api/admin/icons/activate',
-                'POST /api/admin/icons/add'
-            ],
-            general: [
-                'GET /health'
-            ]
-        },
-        suggestion: 'Check the URL and HTTP method. Available endpoints are listed above.'
+        availableEndpoints: [
+            'POST /api/feedback',
+            'GET /api/feedback',
+            'GET /health'
+        ]
     });
 });
 
-// ========================================
-// SERVER STARTUP
-// ========================================
-
 async function startServer() {
     try {
-        console.log('🚀 Starting Unified API server...');
-        console.log('📦 Services: Feedback API + Icon Changer API');
-        
-        // Initialize Google Sheets headers for feedback
         await initializeSheetHeaders();
-        
         app.listen(PORT, () => {
-            console.log(`🎉 Unified API server running on port ${PORT}`);
-            console.log(`📊 Health check: http://localhost:${PORT}/health`);
-            console.log('');
-            console.log('📝 FEEDBACK API ENDPOINTS:');
-            console.log(`   POST   http://localhost:${PORT}/api/feedback`);
-            console.log(`   GET    http://localhost:${PORT}/api/feedback`);
-            console.log('');
-            console.log('🎨 ICON CHANGER API ENDPOINTS:');
-            console.log(`   GET    http://localhost:${PORT}/api/app/current-icon`);
-            console.log(`   GET    http://localhost:${PORT}/api/admin/icons`);
-            console.log(`   POST   http://localhost:${PORT}/api/admin/icons/activate`);
-            console.log(`   POST   http://localhost:${PORT}/api/admin/icons/add`);
-            console.log('');
-            console.log('✅ Both APIs are ready to accept requests!');
+            console.log(`Feedback API server running on port ${PORT}`);
         });
     } catch (error) {
-        console.error('❌ Failed to start server:', error);
+        console.error('Failed to start server:', error);
         process.exit(1);
     }
 }
 
 startServer();
-
 module.exports = app;
